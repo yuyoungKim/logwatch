@@ -48,3 +48,4 @@ class HealthResponse(BaseModel):
     model_ready: bool
     windows_collected: int
     last_retrain: Optional[datetime]
+    summarizer_enabled: bool

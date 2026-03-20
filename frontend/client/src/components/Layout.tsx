@@ -1,7 +1,7 @@
 import type { ReactNode, CSSProperties } from 'react';
 import type { Stats } from '../types';
 
-type Tab = 'logs' | 'timeline' | 'alerts';
+type Tab = 'home' | 'logs' | 'timeline' | 'alerts';
 
 interface LayoutProps {
   tab:         Tab;
@@ -11,6 +11,7 @@ interface LayoutProps {
 }
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: 'home',     label: 'Overview' },
   { id: 'logs',     label: 'Live Logs' },
   { id: 'timeline', label: 'Anomaly Timeline' },
   { id: 'alerts',   label: 'Alert Cards' },

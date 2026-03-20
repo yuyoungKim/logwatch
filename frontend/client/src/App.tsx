@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { Layout }          from './components/Layout';
+import { HomePage }        from './components/HomePage/HomePage';
 import { LogFeed }         from './components/LogFeed/LogFeed';
 import { AnomalyTimeline } from './components/AnomalyTimeline/AnomalyTimeline';
 import { AlertCards }      from './components/AlertCards/AlertCards';
@@ -9,10 +10,10 @@ import { useAnomalies }    from './hooks/useAnomalies';
 import { useStats }        from './hooks/useStats';
 import type { Log, Anomaly, Severity } from './types';
 
-type Tab = 'logs' | 'timeline' | 'alerts';
+type Tab = 'home' | 'logs' | 'timeline' | 'alerts';
 
 export default function App() {
-  const [tab,      setTab]      = useState<Tab>('logs');
+  const [tab,      setTab]      = useState<Tab>('home');
   const [service,  setService]  = useState('');
   const [severity, setSeverity] = useState<Severity | ''>('');
   const [paused,   setPaused]   = useState(false);
@@ -33,6 +34,9 @@ export default function App() {
 
   return (
     <Layout tab={tab} onTabChange={setTab} stats={stats}>
+      {tab === 'home' && (
+        <HomePage stats={stats} onTabChange={setTab} />
+      )}
       {tab === 'logs' && (
         <LogFeed
           logs={logs}

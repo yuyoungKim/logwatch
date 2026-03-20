@@ -25,6 +25,8 @@ import asyncpg
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
+import summarizer
+
 logger = logging.getLogger(__name__)
 
 # --- configuration (all overridable via env) ---
@@ -195,36 +197,33 @@ class AnomalyDetector:
         window_start: datetime,
         window_end: datetime,
         features: list[float],
-    ) -> None:
-        error_rate, warn_rate, avg_lat, p95_lat, volume = features
-        summary = (
-            f"Anomaly in {service}: score={score:.4f}, "
-            f"error_rate={error_rate:.1%}, warn_rate={warn_rate:.1%}, "
-            f"avg_latency={avg_lat:.1f}ms, p95_latency={p95_lat:.1f}ms, "
-            f"log_volume={int(volume)}"
-        )
+    ) -> str:
+        """Insert anomaly row and return its UUID string."""
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            row = await conn.fetchrow(
                 """
                 INSERT INTO anomalies
                     (score, detected_at, summary, window_start, window_end, service_name)
-                VALUES ($1, NOW(), $2, $3, $4, $5)
+                VALUES ($1, NOW(), NULL, $2, $3, $4)
+                RETURNING id::text
                 """,
                 score,
-                summary,
                 window_start,
                 window_end,
                 service,
             )
+        anomaly_id: str = row["id"]
         logger.warning(
             "Anomaly flagged",
             extra={
                 "service": service,
                 "score": score,
+                "anomaly_id": anomaly_id,
                 "window_start": window_start.isoformat(),
                 "window_end": window_end.isoformat(),
             },
         )
+        return anomaly_id
 
     # ------------------------------------------------------------------ #
     # Main loop                                                            #
@@ -267,8 +266,20 @@ class AnomalyDetector:
                         score = self.score_features(features)
                         if score < ANOMALY_THRESHOLD:
                             window_start = now - timedelta(seconds=WINDOW_SECONDS)
-                            await self._write_anomaly(
+                            anomaly_id = await self._write_anomaly(
                                 service, score, window_start, now, features
+                            )
+                            asyncio.create_task(
+                                summarizer.summarize(
+                                    self._pool,
+                                    anomaly_id,
+                                    service,
+                                    window_start,
+                                    now,
+                                    score,
+                                    features,
+                                ),
+                                name=f"summarize-{anomaly_id[:8]}",
                             )
 
                 except asyncio.CancelledError:

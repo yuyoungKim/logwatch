@@ -3,8 +3,8 @@
 ## Overview
 
 Logwatch is a production-quality AI-powered log anomaly detector designed as a
-portfolio project demonstrating distributed systems, stream processing, and
-applied machine learning.
+portfolio project demonstrating distributed systems, stream processing, applied
+machine learning, and LLM integration.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -23,7 +23,8 @@ applied machine learning.
 │                                ┌───────────────▼──────────────────┐    │
 │                                │          PostgreSQL 15            │    │
 │                                │  logs (uuid, jsonb, severity)    │    │
-│                                │  anomalies (score, window, svc)  │    │
+│                                │  anomalies (score, window, svc,  │    │
+│                                │            summary TEXT)          │    │
 │                                └──────┬──────────────┬────────────┘    │
 │                                       │              │                  │
 │                              asyncpg  │         pg (node)               │
@@ -32,6 +33,7 @@ applied machine learning.
 │  │   Redis 7    │            │  ml/ FastAPI  │  │ frontend/server  │   │
 │  │  (reserved)  │            │  IsolForest   │  │ Express REST+SSE │   │
 │  └──────────────┘            │  sliding win  │  └───────┬──────────┘   │
+│                              │  summarizer ──┼──▶ Claude API           │
 │                              └───────────────┘          │              │
 │                                                   nginx proxy          │
 │                                              ┌────────────────────┐    │
@@ -39,7 +41,7 @@ applied machine learning.
 │                                              │  React + Vite      │    │
 │                                              │  Live logs         │    │
 │                                              │  Anomaly timeline  │    │
-│                                              │  Alert cards       │    │
+│                                              │  Alert cards + AI  │    │
 │                                              └────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -67,9 +69,9 @@ applied machine learning.
 - Retries DB connection on startup with exponential backoff (max 10 attempts)
 - Handles SIGINT/SIGTERM: drains the buffer before exiting
 
-### ml/ (Python — Phase 2)
+### ml/ (Python — Phases 2 & 4)
 
-- **framework**: FastAPI + asyncpg + scikit-learn
+- **framework**: FastAPI + asyncpg + scikit-learn + anthropic
 - Runs a background loop: every `SLIDE_SECONDS` (default 10s), queries the last
   `WINDOW_SECONDS` (default 60s) of logs for each service
 - Extracts a 5-dimensional feature vector per window:
@@ -77,8 +79,24 @@ applied machine learning.
 - Scores windows with an `IsolationForest` (100 estimators, contamination=auto)
 - Model fit runs in a thread pool to avoid blocking the event loop
 - Retrains every `RETRAIN_INTERVAL_SECONDS` (default 30 min) to adapt to drift
-- Writes flagged windows to the `anomalies` table
-- Endpoints: `GET /health`, `GET /anomalies`, `POST /score`
+- Writes flagged windows to the `anomalies` table with `summary = NULL`
+- Fires a non-blocking `asyncio.create_task` to `summarizer.py` for each anomaly
+- Endpoints: `GET /health` (includes `summarizer_enabled`), `GET /anomalies`, `POST /score`
+
+#### summarizer.py (Phase 4)
+
+- Triggered fire-and-forget after each anomaly write — never blocks the scoring loop
+- Fetches up to 50 raw logs from the anomaly window, sorted by timestamp
+- Builds a prompt with: service name, time range, anomaly score, feature summary,
+  and the 10 most severe log lines (ERROR-first)
+- Prompt is capped at ~6 000 characters (~1 500 tokens) with truncation
+- Calls `claude-sonnet-4-20250514` (`max_tokens=300`) with a system prompt
+  instructing it to act as a senior SRE
+- Retries once on transient 429 / 529 errors, then gives up
+- On success: `UPDATE anomalies SET summary = $1 WHERE id = $2`
+- On any failure: logs the error, leaves `summary` as `NULL` — never crashes
+  the detector
+- Toggled via `SUMMARIZER_ENABLED` env var (no redeployment needed)
 
 ### frontend/server (Node.js — Phase 3)
 
@@ -86,7 +104,7 @@ applied machine learning.
 - Connects directly to PostgreSQL (same instance as the consumer)
 - Endpoints:
   - `GET /api/logs?limit&service&severity` — paginated log query
-  - `GET /api/anomalies?limit&service` — recent anomalies
+  - `GET /api/anomalies?limit&service` — recent anomalies including `summary` field
   - `GET /api/stats` — severity counts, anomaly count/h, active services
   - `GET /api/stream` — SSE endpoint; polls DB every 3s and pushes `log` and
     `anomaly` events to connected clients
@@ -94,13 +112,17 @@ applied machine learning.
 ### frontend/client (React — Phase 3)
 
 - **stack**: React 18, Vite, TypeScript (strict), recharts
-- Three views:
+- Four views:
+  - **Overview** — landing page showing live metrics (errors/h, warns/h, anomalies/h,
+    active services), visual pipeline diagram, tech stack badges, and quick-nav cards
+    to the other three views
   - **Live Logs** — scrolling table with severity badges (DEBUG=gray, INFO=blue,
     WARN=amber, ERROR=red), service/severity filters, pause toggle
   - **Anomaly Timeline** — recharts `LineChart` with one line per service
     (auth=purple, payment=teal, gateway=coral), click-to-inspect window detail
   - **Alert Cards** — WARNING (score > -0.2) / CRITICAL (score < -0.2) cards
-    with score, time window, log volume, and LLM summary placeholder
+    with score, time window, log volume, and Claude root cause summary
+    (shows "Analysis pending..." while `summary` is `NULL`)
 - Real-time updates via a single `EventSource` connection to `/api/stream`
 - nginx proxies `/api/` to the Express server (SSE-safe: buffering off,
   `proxy_read_timeout 3600s`)
@@ -109,6 +131,7 @@ applied machine learning.
 
 - `docker-compose.yml`: 5 services — PostgreSQL 15, Redis 7, ml, frontend-server,
   frontend-client — all with health checks and startup ordering
+- Run from the project root: `docker compose --project-directory . -f infra/docker-compose.yml up`
 - `migrations/001_init.sql`: idempotent schema (`IF NOT EXISTS`). Runs
   automatically on first container start via `docker-entrypoint-initdb.d`
 - `migrations/002_anomaly_window.sql`: adds `window_start`, `window_end`,
@@ -136,7 +159,7 @@ anomalies (
     log_id       UUID             REFERENCES logs(id) ON DELETE CASCADE,  -- nullable
     score        DOUBLE PRECISION NOT NULL,
     detected_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
-    summary      TEXT,
+    summary      TEXT,            -- NULL until Claude summarizer fills it in
     window_start TIMESTAMPTZ,     -- sliding window start
     window_end   TIMESTAMPTZ,     -- sliding window end
     service_name TEXT             -- which service was anomalous
@@ -162,10 +185,16 @@ anomalies (
 | nginx proxy for `/api/` | Eliminates CORS in production; single origin for the browser |
 | Separate Go modules per service | Each service has its own dependency graph; cleaner for mono-repo |
 | `asyncpg` over `psycopg2` | Native async PostgreSQL driver; fits FastAPI's async model without thread overhead |
+| Fire-and-forget summarizer task | `asyncio.create_task` keeps the 10s scoring loop unblocked even on slow Claude responses |
+| `summary = NULL` until Claude responds | Dashboard shows "Analysis pending..." immediately; summary appears seconds later without a page reload |
+| `SUMMARIZER_ENABLED` env toggle | Operator can disable Claude calls instantly without rebuilding the image |
+| One retry on 429 / 529 | Handles transient Anthropic overload; gives up after one retry to avoid cascading delays |
+| Prompt capped at ~6 000 chars | Stays well under the 2 000-token target; prevents unexpectedly large or expensive requests |
 
 ## Phases
 
 - [x] Phase 1 — Go producer + consumer + PostgreSQL + Redis infra
 - [x] Phase 2 — Python anomaly detection service (IsolationForest, FastAPI)
 - [x] Phase 3 — React dashboard (live logs, anomaly timeline, alert cards)
-- [ ] Phase 4 — LLM root-cause summarizer (Claude API)
+- [x] Phase 4 — Claude API root cause summarizer
+- [x] Phase 5 — Overview homepage with live metrics and pipeline diagram

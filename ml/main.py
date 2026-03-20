@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, status
 from db import create_pool, fetch_recent_anomalies
 from detector import ANOMALY_THRESHOLD, AnomalyDetector
 from models import AnomalyRecord, HealthResponse, ScoreRequest, ScoreResponse
+import summarizer
 
 # JSON-ish log format so log lines are machine-parseable in prod.
 logging.basicConfig(
@@ -40,6 +41,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     pool = await create_pool()
     _detector = AnomalyDetector(pool)
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    summarizer.init(api_key)
 
     task = asyncio.create_task(_detector.run(), name="detector-loop")
     logger.info("ML service started")
@@ -86,6 +90,7 @@ async def health() -> HealthResponse:
         model_ready=d.model_ready,
         windows_collected=d.windows_collected,
         last_retrain=d.last_retrain,
+        summarizer_enabled=summarizer.is_enabled(),
     )
 
 

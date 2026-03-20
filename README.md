@@ -1,34 +1,38 @@
 # logwatch
 
 AI-powered log anomaly detector — portfolio project demonstrating stream
-processing, distributed systems, and applied ML.
+processing, distributed systems, applied ML, and LLM integration.
 
 ## What it does
 
 - Generates realistic structured logs from 3 simulated microservices
 - Batch-inserts logs into PostgreSQL via a Go consumer
 - Scores 60-second sliding windows with a scikit-learn IsolationForest
+- Calls the Claude API to write plain-English root cause summaries for each anomaly
 - Streams live logs and anomalies to a React dashboard via SSE
+- Overview homepage with live metrics, pipeline diagram, and quick navigation
 
 ## Quick Start
 
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker + Docker Compose v2)
-- [Go 1.26+](https://go.dev/dl/) — only needed to run the consumer outside Docker
+- [Go 1.22+](https://go.dev/dl/) — only needed to run the consumer outside Docker
+- An [Anthropic API key](https://console.anthropic.com/) — for Claude root cause summaries
 
 ### 1. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env to set your own passwords if desired.
+# Edit .env — set passwords and add your ANTHROPIC_API_KEY
 ```
 
 ### 2. Start the full stack
 
+Run all commands from the **project root** (`logwatch/`):
+
 ```bash
-cd infra
-docker compose --env-file ../.env up --build -d
+docker compose --project-directory . -f infra/docker-compose.yml up --build -d
 ```
 
 This starts 5 containers: PostgreSQL 15, Redis 7, ML service (FastAPI),
@@ -38,7 +42,7 @@ first start.
 Wait until all services are healthy:
 
 ```bash
-docker compose --env-file ../.env ps
+docker compose --project-directory . -f infra/docker-compose.yml ps
 ```
 
 Open **http://localhost:3000** to view the dashboard.
@@ -57,21 +61,42 @@ go run .
 You should see structured JSON logs on stdout and the Live Logs tab in the
 dashboard will start updating in real time.
 
+### 4. Wait for anomaly summaries
+
+The ML service collects 50 warmup windows (~8 minutes at the default 10s slide
+interval) before the IsolationForest is ready to score. Once `model_ready` is
+`true`, anomalies are detected automatically and Claude generates a 2-3 sentence
+root cause summary for each one. Alert cards on the dashboard update from
+"Analysis pending..." to the real summary within seconds of detection.
+
+Check readiness:
+
+```bash
+curl -s http://localhost:8000/health | python3 -m json.tool
+```
+
+To speed up testing, temporarily set `WARMUP_WINDOWS=5` and
+`ANOMALY_THRESHOLD=0.0` in `.env`, then restart the ML service:
+
+```bash
+docker compose --project-directory . -f infra/docker-compose.yml restart ml
+```
+
 ### Ports
 
 | Service | Port | Description |
 |---|---|---|
 | React dashboard | 3000 | Frontend UI |
 | Express API | 3001 | REST + SSE endpoints |
-| ML service | 8000 | FastAPI anomaly scorer |
+| ML service | 8000 | FastAPI anomaly scorer + Claude summarizer |
 | PostgreSQL | 5432 | Primary data store |
-| Redis | 6379 | Reserved (Phase 4) |
+| Redis | 6379 | Reserved |
 
 ### Stop everything
 
 ```bash
-docker compose --env-file ../.env down       # stop, keep data
-docker compose --env-file ../.env down -v    # stop + wipe volumes
+docker compose --project-directory . -f infra/docker-compose.yml down      # stop, keep data
+docker compose --project-directory . -f infra/docker-compose.yml down -v   # stop + wipe volumes
 ```
 
 ## Running Tests
@@ -104,6 +129,8 @@ cd consumer && go test ./... -v
 | `SLIDE_SECONDS` | `10` | Slide interval |
 | `WARMUP_WINDOWS` | `50` | Windows to collect before first model fit |
 | `RETRAIN_INTERVAL_SECONDS` | `1800` | How often to refit the model |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude summaries (required for Phase 4) |
+| `SUMMARIZER_ENABLED` | `true` | Set to `false` to disable Claude summaries without redeploying |
 
 See [`.env.example`](.env.example) for a complete reference.
 
@@ -128,9 +155,10 @@ logwatch/
 │   └── db/
 │       └── db.go           # pgxpool store, unnest bulk INSERT, retry logic
 │
-├── ml/                     # Python — anomaly detection service
+├── ml/                     # Python — anomaly detection + AI summarizer
 │   ├── main.py             # FastAPI app (GET /health, /anomalies, POST /score)
 │   ├── detector.py         # Sliding-window IsolationForest + retrain loop
+│   ├── summarizer.py       # Claude API integration — root cause summaries
 │   ├── db.py               # asyncpg pool + query helpers
 │   ├── models.py           # Pydantic request/response models
 │   ├── requirements.txt
@@ -142,7 +170,7 @@ logwatch/
 │   │   ├── db.js           # pg.Pool
 │   │   ├── routes/
 │   │   │   ├── logs.js       # GET /api/logs
-│   │   │   ├── anomalies.js  # GET /api/anomalies
+│   │   │   ├── anomalies.js  # GET /api/anomalies (includes summary field)
 │   │   │   ├── stats.js      # GET /api/stats
 │   │   │   └── stream.js     # GET /api/stream (SSE)
 │   │   └── Dockerfile
@@ -155,7 +183,8 @@ logwatch/
 │       │       ├── Layout.tsx
 │       │       ├── LogFeed/          # Live scrolling log table
 │       │       ├── AnomalyTimeline/  # recharts LineChart per service
-│       │       └── AlertCards/       # WARNING / CRITICAL anomaly cards
+│       │       ├── HomePage/         # Overview landing page with live metrics + pipeline
+      │       └── AlertCards/       # WARNING / CRITICAL cards with AI summary
 │       ├── nginx.conf        # Proxies /api/ to Express server
 │       └── Dockerfile        # Multi-stage: node build → nginx serve
 │
@@ -180,4 +209,5 @@ and key engineering decisions.
 - [x] Phase 1 — Go producer + consumer + PostgreSQL + Redis
 - [x] Phase 2 — Python anomaly detection (IsolationForest, FastAPI)
 - [x] Phase 3 — React dashboard (live logs, anomaly timeline, alert cards)
-- [ ] Phase 4 — LLM root-cause summarizer (Claude API)
+- [x] Phase 4 — Claude API root cause summarizer
+- [x] Phase 5 — Overview homepage with live metrics and pipeline diagram

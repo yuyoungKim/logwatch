@@ -11,7 +11,7 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - ./infra/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -37,7 +37,7 @@ services:
 
   ml:
     build:
-      context: ../ml
+      context: ml
       dockerfile: Dockerfile
     container_name: logwatch_ml
     restart: unless-stopped
@@ -52,6 +52,9 @@ services:
       WARMUP_WINDOWS: ${WARMUP_WINDOWS:-50}
       RETRAIN_INTERVAL_SECONDS: ${RETRAIN_INTERVAL_SECONDS:-1800}
       ML_PORT: "8000"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SUMMARIZER_ENABLED: ${SUMMARIZER_ENABLED:-true}
+      SUMMARIZER_MAX_CALLS: ${SUMMARIZER_MAX_CALLS:-0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,7 +71,7 @@ services:
 
   frontend-server:
     build:
-      context: ../frontend/server
+      context: frontend/server
       dockerfile: Dockerfile
     container_name: logwatch_api
     restart: unless-stopped
@@ -91,7 +94,7 @@ services:
 
   frontend-client:
     build:
-      context: ../frontend/client
+      context: frontend/client
       dockerfile: Dockerfile
     container_name: logwatch_frontend
     restart: unless-stopped
