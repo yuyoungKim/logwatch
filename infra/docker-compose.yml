@@ -66,6 +66,49 @@ services:
       retries: 5
       start_period: 30s
 
+  frontend-server:
+    build:
+      context: ../frontend/server
+      dockerfile: Dockerfile
+    container_name: logwatch_api
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PORT: "3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ml:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend-client:
+    build:
+      context: ../frontend/client
+      dockerfile: Dockerfile
+    container_name: logwatch_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      frontend-server:
+        condition: service_healthy
+      ml:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 80 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   postgres_data:
     driver: local
